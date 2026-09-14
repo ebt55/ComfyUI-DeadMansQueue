@@ -1,0 +1,17 @@
+[project]
+name = "comfyui-deadmansqueue"
+description = "Your ComfyUI queue survives a power cut. Mirrors the prompt queue to a crash-safe SQLite database and re-queues every unfinished job automatically on the next start."
+version = "1.0.0"
+license = { file = "LICENSE" }
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = []
+keywords = ["comfyui", "queue", "persistence", "crash-recovery", "power-loss", "resume", "sqlite"]
+
+[project.urls]
+Repository = "https://github.com/ebt55/ComfyUI-DeadMansQueue"
+
+[tool.comfy]
+PublisherId = "YOUR_REGISTRY_PUBLISHER_ID"
+DisplayName = "Dead Man's Queue"
+Icon = ""
