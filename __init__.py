@@ -73,6 +73,7 @@ def _open_db():
     # than only a clean process crash.
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=FULL")
+    conn.execute("PRAGMA secure_delete=ON")
     conn.execute(
         """CREATE TABLE IF NOT EXISTS jobs (
                prompt_id  TEXT    PRIMARY KEY,
@@ -216,6 +217,26 @@ def _dump_graphs(rows):
     return (out_dir if written else None), written
 
 
+def _missing_node_types(item):
+    """Class types in a queued prompt that are not registered right now.
+
+    ComfyUI validates a prompt only when it is submitted to ``/prompt``; a job
+    pushed straight into the queue skips that, and an unknown ``class_type``
+    then raises a ``KeyError`` inside the cache signature code that escapes
+    the worker loop and kills the prompt worker thread. Imported lazily: by
+    the time the startup signal fires every custom node has registered.
+    """
+    import nodes
+
+    prompt = item[2] if len(item) > 2 and isinstance(item[2], dict) else {}
+    missing = set()
+    for node in prompt.values():
+        class_type = node.get("class_type") if isinstance(node, dict) else None
+        if class_type not in nodes.NODE_CLASS_MAPPINGS:
+            missing.add(str(class_type))
+    return sorted(missing)
+
+
 async def _on_startup(_app):
     """Re-queue everything that did not finish last session.
 
@@ -253,15 +274,29 @@ async def _on_startup(_app):
         server = PromptServer.instance
         queue = server.prompt_queue
         restored = 0
+        held = 0
         highest = None
 
         for row in rows:
             prompt_id, number, _state, tuple_len, item_json, _queued_at = row
             try:
                 item = _restore_sensitive(_decode_item(item_json), tuple_len)
-                # Pushed straight back in without re-validating: the prompt was
-                # valid when queued, and the executor already reports a normal
-                # node error if something has since changed underneath it.
+                # A node that no longer loads would crash the worker thread
+                # rather than fail the job, so hold the job back instead. Its
+                # row stays in the database and is retried on the next start.
+                missing = _missing_node_types(item)
+                if missing:
+                    _say(
+                        "holding job %s: node(s) not loaded: %s - fix the custom"
+                        " node and restart to resume it",
+                        prompt_id,
+                        ", ".join(missing),
+                    )
+                    held += 1
+                    continue
+                # Otherwise pushed straight back in: the prompt was valid when
+                # queued, and the executor already reports a normal node error
+                # if something has since changed underneath it.
                 queue.put(item)
                 restored += 1
                 highest = number if highest is None else max(highest, number)
@@ -279,11 +314,15 @@ async def _on_startup(_app):
         _last_restore = {
             "at": time.time(),
             "restored": restored,
+            "held": held,
             "interrupted": interrupted,
             "graphs_written": graph_count,
             "graph_dir": graph_dir,
         }
-        _say("restored %d job(s) - the queue is running again", restored)
+        if held:
+            _say("restored %d job(s), held %d - the queue is running again", restored, held)
+        else:
+            _say("restored %d job(s) - the queue is running again", restored)
         if graph_dir:
             _say("editable copies of those graphs: %s", graph_dir)
     except Exception:
